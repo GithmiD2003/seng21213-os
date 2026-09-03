@@ -1,0 +1,8 @@
+# Build files
+build/
+
+# Generated boot binary
+boot/boot.bin
+
+# Generated OS image
+*.img
