@@ -25,6 +25,10 @@
 #include "keyboard.h"
 #include "../include/types.h"
 
+/* Stage 1 process and scheduler functions */
+extern int create_process(void (*entry_fn)(void));
+extern void scheduler_init(void);
+
 /* ---------------------------------------------------------------------------
  * Forward declarations of shell commands
  * --------------------------------------------------------------------------*/
@@ -210,10 +214,43 @@ static void shell_run(void) {
 /* ---------------------------------------------------------------------------
  * Kernel entry point – called from kernel_entry.asm
  * --------------------------------------------------------------------------*/
-void kernel_main(void) {
+/* Stage 1 test processes */
+
+void process_a(void)
+{
+    while (1) {
+        vga_putchar('A');
+
+        for (volatile uint32_t i = 0; i < 1000000; i++) {
+            /* Delay */
+        }
+    }
+}
+
+void process_b(void)
+{
+    while (1) {
+        vga_putchar('B');
+
+        for (volatile uint32_t i = 0; i < 2000000; i++) {
+            /* Delay */
+        }
+    }
+}
+
+void kernel_main(void)
+{
     vga_init();
     kb_init();
     print_splash();
+
+    /* Create two user processes */
+    create_process(process_a);
+    create_process(process_b);
+
+    /* Start the timer and scheduler */
+    scheduler_init();
+
     shell_run();
 
     /* Should never reach here */
