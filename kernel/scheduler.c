@@ -1,7 +1,9 @@
+#include "vga.h"
 #include "../include/types.h"
 
+
 /* ============================================================
- * PIT (Programmable Interval Timer)
+ * PIT
  * ============================================================ */
 
 #define PIT_COMMAND     0x43
@@ -11,7 +13,7 @@
 #define TIMER_FREQUENCY 100
 
 /* ============================================================
- * PIC (Programmable Interrupt Controller)
+ * PIC
  * ============================================================ */
 
 #define PIC1_COMMAND    0x20
@@ -19,13 +21,11 @@
 #define PIC2_COMMAND    0xA0
 #define PIC2_DATA       0xA1
 
-#define PIC_EOI         0x20
-
 /* ============================================================
  * IDT
  * ============================================================ */
 
-#define IDT_ENTRIES     256
+#define IDT_ENTRIES 256
 
 typedef struct {
     uint16_t base_low;
@@ -43,7 +43,6 @@ typedef struct {
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_pointer_t idt_pointer;
 
-/* IRQ0 handler from boot/switch.asm */
 extern void irq0_stub(void);
 
 /* ============================================================
@@ -67,6 +66,28 @@ extern pcb_t *process_get_table(void);
 extern uint32_t process_get_count(void);
 
 /* ============================================================
+ * Thread information
+ * ============================================================ */
+
+typedef enum {
+    THREAD_READY,
+    THREAD_RUNNING,
+    THREAD_BLOCKED,
+    THREAD_TERMINATED
+} thread_state_t;
+
+typedef struct {
+    uint32_t tid;
+    thread_state_t state;
+    uint32_t esp;
+    void (*entry_point)(void *);
+    void *arg;
+} thread_t;
+
+extern thread_t *thread_get_table(void);
+extern uint32_t thread_get_count(void);
+
+/* ============================================================
  * Port I/O
  * ============================================================ */
 
@@ -80,23 +101,15 @@ static inline void outb(uint16_t port, uint8_t value)
 }
 
 /* ============================================================
- * IDT functions
+ * IDT
  * ============================================================ */
 
-static void idt_set_gate(
-    uint8_t number,
-    uint32_t handler
-)
+static void idt_set_gate(uint8_t number, uint32_t handler)
 {
-    idt[number].base_low =
-        (uint16_t)(handler & 0xFFFF);
-
+    idt[number].base_low = (uint16_t)(handler & 0xFFFF);
     idt[number].selector = 0x08;
     idt[number].always_zero = 0;
-
-    /* Present + ring 0 + 32-bit interrupt gate */
     idt[number].flags = 0x8E;
-
     idt[number].base_high =
         (uint16_t)((handler >> 16) & 0xFFFF);
 }
@@ -115,11 +128,8 @@ static void idt_init(void)
 
     idt_set_gate(0x20, (uint32_t)irq0_stub);
 
-    idt_pointer.limit =
-        (uint16_t)(sizeof(idt) - 1);
-
-    idt_pointer.base =
-        (uint32_t)&idt;
+    idt_pointer.limit = (uint16_t)(sizeof(idt) - 1);
+    idt_pointer.base = (uint32_t)&idt;
 
     __asm__ __volatile__(
         "lidtl (%0)"
@@ -134,40 +144,22 @@ static void idt_init(void)
 
 static void pic_init(void)
 {
-    /*
-     * Start PIC initialization sequence.
-     */
     outb(PIC1_COMMAND, 0x11);
     outb(PIC2_COMMAND, 0x11);
 
-    /*
-     * Remap IRQs:
-     *
-     * Master PIC: IRQ0-7  -> INT 20h-27h
-     * Slave PIC : IRQ8-15 -> INT 28h-2Fh
-     */
     outb(PIC1_DATA, 0x20);
     outb(PIC2_DATA, 0x28);
 
-    /*
-     * Tell the PICs how they are connected.
-     */
     outb(PIC1_DATA, 0x04);
     outb(PIC2_DATA, 0x02);
 
-    /*
-     * 8086/88 mode.
-     */
     outb(PIC1_DATA, 0x01);
     outb(PIC2_DATA, 0x01);
 
-    /*
-     * Enable only IRQ0 on the master PIC.
-     * Mask all other hardware interrupts.
-     */
+    /* Enable only IRQ0 on the master PIC */
     outb(PIC1_DATA, 0xFE);
 
-    /* Mask all slave PIC interrupts. */
+    /* Disable all IRQs on the slave PIC */
     outb(PIC2_DATA, 0xFF);
 }
 
@@ -181,96 +173,265 @@ void pit_init(void)
 
     divisor = PIT_FREQUENCY / TIMER_FREQUENCY;
 
-    /*
-     * Channel 0
-     * Low byte + high byte
-     * Mode 3 (square wave)
-     */
     outb(PIT_COMMAND, 0x36);
 
-    outb(
-        PIT_CHANNEL0,
-        (uint8_t)(divisor & 0xFF)
-    );
+    outb(PIT_CHANNEL0,
+         (uint8_t)(divisor & 0xFF));
 
-    outb(
-        PIT_CHANNEL0,
-        (uint8_t)((divisor >> 8) & 0xFF)
-    );
+    outb(PIT_CHANNEL0,
+         (uint8_t)((divisor >> 8) & 0xFF));
 }
 
 /* ============================================================
  * Scheduler state
  * ============================================================ */
 
+typedef enum {
+    SCHEDULE_PROCESS,
+    SCHEDULE_THREAD
+} schedule_type_t;
+
+static schedule_type_t current_type = SCHEDULE_PROCESS;
+
 static uint32_t current_pid = 0;
+static uint32_t current_tid = 0;
+
 static uint32_t tick_count = 0;
 
 /*
- * Called by irq0_stub().
+ * The first timer interrupt happens while the kernel/shell
+ * is still running.
  *
- * current_esp points to the register frame created by PUSHAD.
- *
- * Returns the ESP of the next process.
+ * Therefore we must NOT save the kernel stack as process 0's
+ * stack. Process 0 already has a prepared stack.
  */
+static bool first_schedule = true;
+
+/* ============================================================
+ * Scheduler interrupt
+ * ============================================================ */
+
 uint32_t scheduler_irq(uint32_t current_esp)
 {
-    pcb_t *table;
-    uint32_t count;
-    uint32_t next_pid;
+    pcb_t *process_table;
+    thread_t *thread_table;
+
+    uint32_t process_count;
+    uint32_t thread_count;
 
     tick_count++;
 
-    table = process_get_table();
-    count = process_get_count();
+    process_table = process_get_table();
+    process_count = process_get_count();
 
-    /*
-     * No processes to schedule.
-     */
-    if (count == 0) {
-        return current_esp;
-    }
+    thread_table = thread_get_table();
+    thread_count = thread_get_count();
 
-    /*
-     * Save the current process context.
-     */
-    table[current_pid].esp = current_esp;
+    /* ========================================================
+     * FIRST SCHEDULE
+     * ======================================================== */
 
-    /*
-     * Mark the current process READY.
-     */
-    if (table[current_pid].state == PROCESS_RUNNING) {
-        table[current_pid].state = PROCESS_READY;
-    }
+    if (first_schedule) {
 
-    /*
-     * Find the next process using Round-Robin.
-     */
-    next_pid = current_pid;
+        first_schedule = false;
 
-    do {
-        next_pid++;
+        /*
+         * Start with process 0.
+         */
+        if (process_count > 0) {
 
-        if (next_pid >= count) {
-            next_pid = 0;
+            current_type = SCHEDULE_PROCESS;
+            current_pid = 0;
+
+            process_table[0].state =
+                PROCESS_RUNNING;
+
+            return process_table[0].esp;
         }
 
         /*
-         * Stop when we find a process that can run.
+         * If there are no processes, start with thread 0.
          */
-        if (table[next_pid].state != PROCESS_TERMINATED) {
-            break;
+        if (thread_count > 0) {
+
+            current_type = SCHEDULE_THREAD;
+            current_tid = 0;
+
+            thread_table[0].state =
+                THREAD_RUNNING;
+
+            vga_putchar('T');
+
+            return thread_table[0].esp;
         }
 
-    } while (next_pid != current_pid);
+        return current_esp;
+    }
 
-    current_pid = next_pid;
-    table[current_pid].state = PROCESS_RUNNING;
+    /* ========================================================
+     * SAVE CURRENT CONTEXT
+     * ======================================================== */
 
-    /*
-     * Return the next process's saved stack.
-     */
-    return table[current_pid].esp;
+    if (current_type == SCHEDULE_PROCESS) {
+
+        if (process_count > 0) {
+
+            /*
+             * Save the stack pointer created by pushad.
+             */
+            process_table[current_pid].esp =
+                current_esp;
+
+            /*
+             * Mark the process ready again.
+             */
+            if (process_table[current_pid].state ==
+                PROCESS_RUNNING) {
+
+                process_table[current_pid].state =
+                    PROCESS_READY;
+            }
+        }
+
+    } else {
+
+        if (thread_count > 0) {
+
+            /*
+             * Save the current thread's stack.
+             */
+            thread_table[current_tid].esp =
+                current_esp;
+
+            /*
+             * Mark it ready again.
+             */
+            if (thread_table[current_tid].state ==
+                THREAD_RUNNING) {
+
+                thread_table[current_tid].state =
+                    THREAD_READY;
+            }
+        }
+    }
+
+    /* ========================================================
+     * PROCESS SCHEDULING
+     *
+     * Order:
+     *
+     *   Process 0
+     *       ↓
+     *   Process 1
+     *       ↓
+     *   Thread 0
+     *       ↓
+     *   Thread 1
+     *       ↓
+     *   Process 0
+     *       ↓
+     *      ...
+     * ======================================================== */
+
+    if (current_type == SCHEDULE_PROCESS) {
+
+        /*
+         * First try the next process.
+         */
+        if (current_pid + 1 < process_count) {
+
+            current_pid++;
+
+            process_table[current_pid].state =
+                PROCESS_RUNNING;
+
+            return process_table[current_pid].esp;
+        }
+
+        /*
+         * No more processes.
+         * Move to the first thread.
+         */
+        if (thread_count > 0) {
+
+            current_type = SCHEDULE_THREAD;
+            current_tid = 0;
+
+            thread_table[0].state =
+                THREAD_RUNNING;
+
+            vga_putchar('T');
+
+            return thread_table[0].esp;
+        }
+
+        /*
+         * No threads.
+         * Return to process 0.
+         */
+        if (process_count > 0) {
+
+            current_pid = 0;
+
+            process_table[0].state =
+                PROCESS_RUNNING;
+
+            return process_table[0].esp;
+        }
+    }
+
+    /* ========================================================
+     * THREAD SCHEDULING
+     *
+     * Thread 0 → Thread 1 → Process 0
+     * ======================================================== */
+
+    else {
+
+        /*
+         * Move to the next thread.
+         */
+        if (current_tid + 1 < thread_count) {
+
+            current_tid++;
+
+            thread_table[current_tid].state =
+                THREAD_RUNNING;
+
+            return thread_table[current_tid].esp;
+        }
+
+        /*
+         * No more threads.
+         * Return to process 0.
+         */
+        if (process_count > 0) {
+
+            current_type = SCHEDULE_PROCESS;
+            current_pid = 0;
+
+            process_table[0].state =
+                PROCESS_RUNNING;
+
+            return process_table[0].esp;
+        }
+
+        /*
+         * If there are no processes, restart at thread 0.
+         */
+        if (thread_count > 0) {
+
+            current_tid = 0;
+
+            thread_table[0].state =
+                THREAD_RUNNING;
+
+
+            return thread_table[0].esp;
+        }
+    }
+
+    return current_esp;
 }
 
 /* ============================================================
@@ -279,8 +440,14 @@ uint32_t scheduler_irq(uint32_t current_esp)
 
 void scheduler_init(void)
 {
+    current_type = SCHEDULE_PROCESS;
+
     current_pid = 0;
+    current_tid = 0;
+
     tick_count = 0;
+
+    first_schedule = true;
 
     idt_init();
     pic_init();
@@ -304,4 +471,8 @@ uint32_t scheduler_current_pid(void)
 uint32_t scheduler_tick_count(void)
 {
     return tick_count;
+}
+uint32_t scheduler_current_tid(void)
+{
+    return current_tid;
 }
