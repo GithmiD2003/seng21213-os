@@ -183,7 +183,7 @@ detect_e820:
 boot_drive  db 0
 
 msg_banner  db 13, 10, '  ================================', 13, 10
-            db '  SENG21213-OS | Stage 3', 13, 10, 0
+            db '  SENG21213-OS | Stage 4', 13, 10, 0
 msg_load    db '  Loading kernel...', 13, 10, 0
 msg_ok      db '  Kernel loaded.', 13, 10, 0
 msg_err     db '  Disk error!', 13, 10, 0
