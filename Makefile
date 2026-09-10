@@ -27,13 +27,13 @@ ASFLAGS  := -f elf32
 ifneq (, $(shell which i686-elf-gcc 2>/dev/null))
     CC   := i686-elf-gcc
     LD   := i686-elf-ld
-    CFLAGS := -m32 -ffreestanding -fno-stack-protector -fno-pie -nostdlib \
+    CFLAGS := -std=gnu11 -m32 -ffreestanding -fno-stack-protector -fno-pie -nostdlib \
               -Wall -Wextra -O2 -I./include
     LDFLAGS := -m elf_i386 -nostdlib
 else
     CC   := gcc
     LD   := ld
-    CFLAGS := -m32 -ffreestanding -fno-stack-protector -fno-pie -nostdlib \
+    CFLAGS := -std=gnu11 -m32 -ffreestanding -fno-stack-protector -fno-pie -nostdlib \
               -Wall -Wextra -O2 -I./include
     LDFLAGS := -m elf_i386 -nostdlib
 endif
@@ -57,15 +57,14 @@ KERNEL_C_SRCS  := kernel/kernel.c \
                    kernel/scheduler.c \
                    kernel/thread.c \
                    kernel/mutex.c \
-                   kernel/semaphore.c
+                   kernel/semaphore.c \
+                   kernel/pmm.c
 
-# Add your new source files below as the course progresses:
-# Lecture 09: kernel/process.c kernel/scheduler.c
-# Lecture 10: kernel/thread.c \
-                   kernel/mutex.c \
-                   kernel/semaphore.c  kernel/mutex.c
-# Lecture 11: kernel/pmm.c     kernel/vmm.c
-# Lecture 12: kernel/fs.c
+# Course progression:
+# Lecture 09: kernel/process.c kernel/scheduler.c boot/switch.asm
+# Lecture 10: kernel/thread.c kernel/mutex.c kernel/semaphore.c
+# Lecture 11: kernel/pmm.c
+# Lecture 12: kernel/ramdisk.c kernel/fs.c
 
 KERNEL_C_OBJS  := $(patsubst kernel/%.c, build/%.o, $(KERNEL_C_SRCS))
 KERNEL_ELF     := build/kernel.elf

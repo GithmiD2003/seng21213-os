@@ -2,13 +2,11 @@
  * SENG21213-OS :: Main Kernel
  * File   : kernel/kernel.c
  *
- * Stage 2:
- *   - Processes
- *   - Kernel threads
- *   - Blocking mutex
- *   - Blocking semaphore
- *   - Producer-consumer bounded buffer
- *   - Race condition demonstration
+ * Stage 3:
+ *   - BIOS E820 physical-memory discovery
+ *   - One-bit-per-frame bitmap allocator
+ *   - 4 KB frame allocation and release
+ *   - meminfo shell command
  * =============================================================================*/
 
 #include "vga.h"
@@ -17,6 +15,7 @@
 #include "../include/types.h"
 #include "mutex.h"
 #include "semaphore.h"
+#include "pmm.h"
 
 /* ---------------------------------------------------------------------------
  * Process and scheduler functions
@@ -32,6 +31,7 @@ static void cmd_clear(void);
 static void cmd_about(void);
 static void cmd_echo(const char *args);
 static void cmd_mem(void);
+static void cmd_meminfo(void);
 
 /* ---------------------------------------------------------------------------
  * String utilities
@@ -94,21 +94,21 @@ static void print_splash(void)
 
     vga_set_cursor(2, 2);
     vga_puts_color(
-        "  Stage 2: Threads & Synchronization",
+        "  Stage 3: Physical Memory Manager",
         VGA_LIGHT_CYAN,
         VGA_BLACK
     );
 
     vga_set_cursor(3, 2);
     vga_puts_color(
-        "  Faculty of Engineering – Department of Software Engineering",
+        "  Faculty of Engineering - Department of Software Engineering",
         VGA_LIGHT_GREY,
         VGA_BLACK
     );
 
     vga_set_cursor(4, 2);
     vga_puts_color(
-        "  Kernel threads, mutexes and semaphores",
+        "  BIOS E820 map and 4 KB bitmap frame allocator",
         VGA_LIGHT_GREEN,
         VGA_BLACK
     );
@@ -128,7 +128,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "  from bare metal. There is no Linux or Windows underneath – only\n"
+        "  from bare metal. There is no Linux or Windows underneath - only\n"
     );
 
     vga_puts(
@@ -137,7 +137,7 @@ static void print_splash(void)
 
     vga_puts("\n");
 
-    vga_puts("  Stage 2 components:\n");
+    vga_puts("  Stage 3 components:\n");
 
     vga_puts_color(
         "    [OK] ",
@@ -146,17 +146,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "Kernel threads\n"
-    );
-
-    vga_puts_color(
-        "    [OK] ",
-        VGA_LIGHT_GREEN,
-        VGA_BLACK
-    );
-
-    vga_puts(
-        "Round-robin thread scheduling\n"
+        "BIOS E820 memory detection\n"
     );
 
     vga_puts_color(
@@ -166,7 +156,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "Blocking mutex\n"
+        "One bit per 4 KB physical frame\n"
     );
 
     vga_puts_color(
@@ -176,7 +166,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "Blocking semaphore\n"
+        "pmm_alloc_frame()\n"
     );
 
     vga_puts_color(
@@ -186,7 +176,17 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "Producer-consumer bounded buffer\n"
+        "pmm_free_frame()\n"
+    );
+
+    vga_puts_color(
+        "    [OK] ",
+        VGA_LIGHT_GREEN,
+        VGA_BLACK
+    );
+
+    vga_puts(
+        "meminfo shell command\n"
     );
 
     vga_puts("\n");
@@ -204,27 +204,31 @@ static void cmd_help(void)
     );
 
     vga_puts(
-        "  ─────────────────────────────────────────────\n"
+        "  ---------------------------------------------\n"
     );
 
     vga_puts(
-        "  help    – Show this help message\n"
+        "  help    - Show this help message\n"
     );
 
     vga_puts(
-        "  clear   – Clear the screen\n"
+        "  clear   - Clear the screen\n"
     );
 
     vga_puts(
-        "  about   – About this OS and course\n"
+        "  about   - About this OS and course\n"
     );
 
     vga_puts(
-        "  echo    – Echo text to screen\n"
+        "  echo    - Echo text to screen\n"
     );
 
     vga_puts(
-        "  mem     – Memory map\n"
+        "  mem     - Memory map\n"
+    );
+
+    vga_puts(
+        "  meminfo - Physical frame allocator statistics\n"
     );
 
     vga_puts("\n");
@@ -244,7 +248,7 @@ static void cmd_about(void)
     );
 
     vga_puts(
-        "  ─────────────────────────────────────────────\n"
+        "  ---------------------------------------------\n"
     );
 
     vga_puts(
@@ -264,11 +268,11 @@ static void cmd_about(void)
     );
 
     vga_puts(
-        "  Course       : SENG 21213 – Sem 2\n"
+        "  Course       : SENG 21213 - Sem 2\n"
     );
 
     vga_puts(
-        "  Stage        : Stage 2 – Threads & Synchronization\n\n"
+        "  Stage        : Stage 3 - Physical Memory Manager\n\n"
     );
 }
 
@@ -288,24 +292,47 @@ static void cmd_mem(void)
     );
 
     vga_puts(
-        "  ─────────────────────────────────────────────\n"
+        "  ---------------------------------------------\n"
     );
 
     vga_puts(
-        "  0x00000000 – 0x000FFFFF  : First 1 MB\n"
+        "  0x00000000 - 0x000FFFFF  : First 1 MB\n"
     );
 
     vga_puts(
-        "  0x00100000 – 0x00EFFFFF  : Extended memory\n"
+        "  0x00100000 - 0x00EFFFFF  : Extended memory\n"
     );
 
     vga_puts(
-        "  0x00F00000 – 0x00FFFFFF  : BIOS / ROM area\n"
+        "  0x00F00000 - 0x00FFFFFF  : BIOS / ROM area\n"
     );
 
     vga_puts(
-        "  0xB8000    – 0xBFFFF     : VGA frame buffer\n\n"
+        "  0xB8000    - 0xBFFFF     : VGA frame buffer\n\n"
     );
+}
+
+static void cmd_meminfo(void)
+{
+    uint32_t total = pmm_get_total_frames();
+    uint32_t used = pmm_get_used_frames();
+    uint32_t free = pmm_get_free_frames();
+
+    vga_puts_color(
+        "\n  Physical Memory Information\n",
+        VGA_LIGHT_CYAN,
+        VGA_BLACK
+    );
+
+    vga_puts(
+        "  ---------------------------------------------\n"
+    );
+
+    vga_printf("  BIOS E820 entries : %u\n", pmm_get_e820_entry_count());
+    vga_printf("  Frame size        : %u bytes\n", PMM_FRAME_SIZE);
+    vga_printf("  Total frames      : %u (%u MiB)\n", total, total / 256U);
+    vga_printf("  Used frames       : %u\n", used);
+    vga_printf("  Free frames       : %u\n\n", free);
 }
 
 /* ---------------------------------------------------------------------------
@@ -358,6 +385,11 @@ static void shell_run(void)
 
         if (k_strcmp(cmd, "mem") == 0) {
             cmd_mem();
+            continue;
+        }
+
+        if (k_strcmp(cmd, "meminfo") == 0) {
+            cmd_meminfo();
             continue;
         }
 
@@ -654,48 +686,16 @@ void kernel_main(void)
     vga_init();
     kb_init();
 
+    /* Build the Stage 3 frame bitmap from the bootloader's BIOS E820 map. */
+    pmm_init();
+
     /* Display startup information */
     print_splash();
 
-    /* -----------------------------------------------------------------------
-     * Stage 1 processes
-     * ----------------------------------------------------------------------*/
-
-    create_process(process_a);
-    create_process(process_b);
-
-    /* -----------------------------------------------------------------------
-     * Stage 2 mutex
-     * ----------------------------------------------------------------------*/
-
-    mutex_init(&test_mutex);
-
-    /* -----------------------------------------------------------------------
-     * Stage 2 producer-consumer synchronization
-     * ----------------------------------------------------------------------*/
-
-    sem_init(&empty_slots, BUFFER_SIZE);
-    sem_init(&full_slots, 0);
-
-    mutex_init(&buffer_mutex);
-
-    /* -----------------------------------------------------------------------
-     * Create Stage 2 threads
-     * ----------------------------------------------------------------------*/
-
-    thread_create(thread_a, NULL);
-    thread_create(thread_b, NULL);
-
-    thread_create(producer, NULL);
-    thread_create(consumer, NULL);
-
-    /*
-     * NOTE:
-     *
-     * The race-condition threads are intentionally NOT created here yet.
-     * They are finite tests and will be run separately after the scheduler
-     * correctly handles THREAD_TERMINATED.
-     */
+    /* Stage 1 and Stage 2 implementations remain in the kernel. Their noisy
+     * demonstration tasks are not auto-started in Stage 3, leaving the shell
+     * usable for the meminfo command. The tagged older releases retain their
+     * original demonstrations for assessment. */
 
     /* -----------------------------------------------------------------------
      * Start scheduler
