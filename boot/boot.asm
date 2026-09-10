@@ -30,6 +30,11 @@ start:
     mov  si, msg_load
     call print_rm
 
+    ; Ask the BIOS for the physical memory map while BIOS interrupts are
+    ; still available.  The protected-mode kernel reads the result from
+    ; 0x5000 (count) and 0x5004 (entries).
+    call detect_e820
+
 ; ---------------------------------------------------------------------------
 ; Load kernel: read sectors 2..65 from disk into memory at 0x1000:0x0000
 ; This gives us 64 × 512 = 32 768 bytes for the kernel (Stage 0)
@@ -114,18 +119,75 @@ print_rm:
     ret
 
 ; ---------------------------------------------------------------------------
+; Subroutine: detect_e820 - collect the BIOS E820 physical memory map
+;
+; Memory layout passed to the kernel:
+;   0x5000              dword entry count
+;   0x5004 + n * 24     E820 entry (base, length, type, attributes)
+; ---------------------------------------------------------------------------
+E820_COUNT_ADDR equ 0x5000
+E820_MAP_ADDR   equ 0x5004
+E820_ENTRY_SIZE equ 24
+E820_MAX_ENTRIES equ 32
+
+detect_e820:
+    pushad
+    push es
+
+    xor  ax, ax
+    mov  es, ax
+    mov  di, E820_MAP_ADDR
+    xor  ebx, ebx                    ; Continuation value for first call
+    mov  dword [E820_COUNT_ADDR], 0
+
+.next_entry:
+    cmp  dword [E820_COUNT_ADDR], E820_MAX_ENTRIES
+    jae  .done
+
+    mov  eax, 0xE820
+    mov  edx, 0x534D4150             ; "SMAP"
+    mov  ecx, E820_ENTRY_SIZE
+    mov  dword [es:di + 20], 1       ; Request ACPI 3.x attributes
+    int  0x15
+    jc   .done                       ; Carry means end/error
+
+    cmp  eax, 0x534D4150
+    jne  .failed
+    cmp  ecx, 20                    ; A valid entry has at least 20 bytes
+    jb   .skip_entry
+
+    ; Ignore zero-length ranges.
+    mov  eax, [es:di + 8]
+    or   eax, [es:di + 12]
+    jz   .skip_entry
+
+    inc  dword [E820_COUNT_ADDR]
+    add  di, E820_ENTRY_SIZE
+
+.skip_entry:
+    test ebx, ebx
+    jne  .next_entry
+    jmp  .done
+
+.failed:
+    mov  dword [E820_COUNT_ADDR], 0
+
+.done:
+    pop  es
+    popad
+    ret
+
+; ---------------------------------------------------------------------------
 ; Data
 ; ---------------------------------------------------------------------------
 boot_drive  db 0
 
 msg_banner  db 13, 10, '  ================================', 13, 10
-            db '  SENG21213-OS  |  Stage 0        ', 13, 10
-            db '  Computer Architecture & OS       ', 13, 10
-            db '  ================================', 13, 10, 0
-msg_load    db '  [BOOT] Loading kernel...', 13, 10, 0
-msg_ok      db '  [BOOT] Kernel loaded OK ', 13, 10, 0
-msg_err     db '  [BOOT] DISK ERROR!       ', 13, 10, 0
-msg_halt    db '  System halted.           ', 13, 10, 0
+            db '  SENG21213-OS | Stage 3', 13, 10, 0
+msg_load    db '  Loading kernel...', 13, 10, 0
+msg_ok      db '  Kernel loaded.', 13, 10, 0
+msg_err     db '  Disk error!', 13, 10, 0
+msg_halt    db '  Halted.', 13, 10, 0
 
 ; ---------------------------------------------------------------------------
 ; GDT – Global Descriptor Table
