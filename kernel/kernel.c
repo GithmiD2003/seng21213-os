@@ -2,11 +2,11 @@
  * SENG21213-OS :: Main Kernel
  * File   : kernel/kernel.c
  *
- * Stage 3:
- *   - BIOS E820 physical-memory discovery
- *   - One-bit-per-frame bitmap allocator
- *   - 4 KB frame allocation and release
- *   - meminfo shell command
+ * Stage 4:
+ *   - 1 MB RAM disk backed by physical frames
+ *   - Superblock, bitmaps, inodes and flat directory
+ *   - POSIX-inspired file API
+ *   - File-system shell commands
  * =============================================================================*/
 
 #include "vga.h"
@@ -16,6 +16,8 @@
 #include "mutex.h"
 #include "semaphore.h"
 #include "pmm.h"
+#include "ramdisk.h"
+#include "fs.h"
 
 /* ---------------------------------------------------------------------------
  * Process and scheduler functions
@@ -32,6 +34,13 @@ static void cmd_about(void);
 static void cmd_echo(const char *args);
 static void cmd_mem(void);
 static void cmd_meminfo(void);
+static void cmd_ls(void);
+static void cmd_touch(const char *args);
+static void cmd_cat(const char *args);
+static void cmd_write(const char *args);
+static void cmd_rm(const char *args);
+
+static bool filesystem_ready;
 
 /* ---------------------------------------------------------------------------
  * String utilities
@@ -94,7 +103,7 @@ static void print_splash(void)
 
     vga_set_cursor(2, 2);
     vga_puts_color(
-        "  Stage 3: Physical Memory Manager",
+        "  Stage 4: RAM Disk File System",
         VGA_LIGHT_CYAN,
         VGA_BLACK
     );
@@ -108,7 +117,7 @@ static void print_splash(void)
 
     vga_set_cursor(4, 2);
     vga_puts_color(
-        "  BIOS E820 map and 4 KB bitmap frame allocator",
+        "  Inodes, directories and POSIX-inspired file operations",
         VGA_LIGHT_GREEN,
         VGA_BLACK
     );
@@ -137,7 +146,7 @@ static void print_splash(void)
 
     vga_puts("\n");
 
-    vga_puts("  Stage 3 components:\n");
+    vga_puts("  Stage 4 components:\n");
 
     vga_puts_color(
         "    [OK] ",
@@ -146,17 +155,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "BIOS E820 memory detection\n"
-    );
-
-    vga_puts_color(
-        "    [OK] ",
-        VGA_LIGHT_GREEN,
-        VGA_BLACK
-    );
-
-    vga_puts(
-        "One bit per 4 KB physical frame\n"
+        "1 MB frame-backed RAM disk\n"
     );
 
     vga_puts_color(
@@ -166,7 +165,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "pmm_alloc_frame()\n"
+        "Superblock and allocation bitmaps\n"
     );
 
     vga_puts_color(
@@ -176,7 +175,7 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "pmm_free_frame()\n"
+        "Inodes and flat directory\n"
     );
 
     vga_puts_color(
@@ -186,7 +185,17 @@ static void print_splash(void)
     );
 
     vga_puts(
-        "meminfo shell command\n"
+        "open/read/write/close/unlink API\n"
+    );
+
+    vga_puts_color(
+        "    [OK] ",
+        VGA_LIGHT_GREEN,
+        VGA_BLACK
+    );
+
+    vga_puts(
+        "ls/touch/cat/write/rm commands\n"
     );
 
     vga_puts("\n");
@@ -231,6 +240,12 @@ static void cmd_help(void)
         "  meminfo - Physical frame allocator statistics\n"
     );
 
+    vga_puts("  ls      - List files\n");
+    vga_puts("  touch   - Create a file: touch <name>\n");
+    vga_puts("  cat     - Read a file: cat <name>\n");
+    vga_puts("  write   - Write a file: write <name> <text>\n");
+    vga_puts("  rm      - Delete a file: rm <name>\n");
+
     vga_puts("\n");
 }
 
@@ -272,7 +287,7 @@ static void cmd_about(void)
     );
 
     vga_puts(
-        "  Stage        : Stage 3 - Physical Memory Manager\n\n"
+        "  Stage        : Stage 4 - RAM Disk File System\n\n"
     );
 }
 
@@ -335,6 +350,160 @@ static void cmd_meminfo(void)
     vga_printf("  Free frames       : %u\n\n", free);
 }
 
+static bool parse_filename(const char *args, char *name, const char **remaining)
+{
+    uint32_t length = 0;
+
+    args = k_ltrim(args);
+
+    while (args[length] != '\0' && args[length] != ' ') {
+        if (length >= FS_MAX_NAME) {
+            return false;
+        }
+        name[length] = args[length];
+        length++;
+    }
+
+    if (length == 0) {
+        return false;
+    }
+
+    name[length] = '\0';
+    *remaining = k_ltrim(args + length);
+    return true;
+}
+
+static void cmd_ls(void)
+{
+    static fs_file_info_t files[FS_MAX_FILES];
+    uint32_t count;
+
+    if (!filesystem_ready) {
+        vga_puts("  File system is unavailable.\n");
+        return;
+    }
+
+    count = fs_list(files, FS_MAX_FILES);
+    vga_puts_color("\n  Files\n", VGA_LIGHT_CYAN, VGA_BLACK);
+    vga_puts("  ---------------------------------------------\n");
+
+    if (count == 0) {
+        vga_puts("  (empty)\n\n");
+        return;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        vga_puts("  ");
+        vga_puts(files[i].name);
+        vga_printf("  %u bytes\n", files[i].size);
+    }
+
+    vga_puts("\n");
+}
+
+static void cmd_touch(const char *args)
+{
+    char name[FS_MAX_NAME + 1U];
+    const char *remaining;
+    int descriptor;
+
+    if (!parse_filename(args, name, &remaining) || *remaining != '\0') {
+        vga_puts("  Usage: touch <name>\n");
+        return;
+    }
+
+    descriptor = fs_open(name, FS_O_WRITE | FS_O_CREATE);
+    if (descriptor < 0) {
+        vga_puts("  touch: could not create file\n");
+        return;
+    }
+
+    fs_close(descriptor);
+    vga_puts("  File created: ");
+    vga_puts(name);
+    vga_puts("\n");
+}
+
+static void cmd_cat(const char *args)
+{
+    char name[FS_MAX_NAME + 1U];
+    char buffer[128];
+    const char *remaining;
+    int descriptor;
+    int bytes_read;
+
+    if (!parse_filename(args, name, &remaining) || *remaining != '\0') {
+        vga_puts("  Usage: cat <name>\n");
+        return;
+    }
+
+    descriptor = fs_open(name, FS_O_READ);
+    if (descriptor < 0) {
+        vga_puts("  cat: file not found\n");
+        return;
+    }
+
+    vga_puts("  ");
+    do {
+        bytes_read = fs_read(descriptor, buffer, sizeof(buffer));
+        for (int i = 0; i < bytes_read; i++) {
+            vga_putchar(buffer[i]);
+        }
+    } while (bytes_read > 0);
+
+    fs_close(descriptor);
+    vga_puts("\n");
+}
+
+static void cmd_write(const char *args)
+{
+    char name[FS_MAX_NAME + 1U];
+    const char *text;
+    int descriptor;
+    int written;
+
+    if (!parse_filename(args, name, &text) || *text == '\0') {
+        vga_puts("  Usage: write <name> <text>\n");
+        return;
+    }
+
+    descriptor = fs_open(name, FS_O_WRITE | FS_O_CREATE | FS_O_TRUNC);
+    if (descriptor < 0) {
+        vga_puts("  write: could not open file\n");
+        return;
+    }
+
+    written = fs_write(descriptor, text, (uint32_t)k_strlen(text));
+    fs_close(descriptor);
+
+    if (written < 0) {
+        vga_puts("  write: operation failed\n");
+        return;
+    }
+
+    vga_printf("  Wrote %u bytes to %s\n", (uint32_t)written, name);
+}
+
+static void cmd_rm(const char *args)
+{
+    char name[FS_MAX_NAME + 1U];
+    const char *remaining;
+
+    if (!parse_filename(args, name, &remaining) || *remaining != '\0') {
+        vga_puts("  Usage: rm <name>\n");
+        return;
+    }
+
+    if (fs_unlink(name) != 0) {
+        vga_puts("  rm: file not found\n");
+        return;
+    }
+
+    vga_puts("  File removed: ");
+    vga_puts(name);
+    vga_puts("\n");
+}
+
 /* ---------------------------------------------------------------------------
  * Shell
  * --------------------------------------------------------------------------*/
@@ -393,6 +562,31 @@ static void shell_run(void)
             continue;
         }
 
+        if (k_strcmp(cmd, "ls") == 0) {
+            cmd_ls();
+            continue;
+        }
+
+        if (k_strncmp(cmd, "touch ", 6) == 0) {
+            cmd_touch(cmd + 6);
+            continue;
+        }
+
+        if (k_strncmp(cmd, "cat ", 4) == 0) {
+            cmd_cat(cmd + 4);
+            continue;
+        }
+
+        if (k_strncmp(cmd, "write ", 6) == 0) {
+            cmd_write(cmd + 6);
+            continue;
+        }
+
+        if (k_strncmp(cmd, "rm ", 3) == 0) {
+            cmd_rm(cmd + 3);
+            continue;
+        }
+
         if (k_strncmp(cmd, "echo ", 5) == 0) {
             cmd_echo(k_ltrim(cmd + 5));
             continue;
@@ -413,7 +607,7 @@ static void shell_run(void)
 }
 
 /* =============================================================================
- * STAGE 1 — PROCESS TESTS
+ * STAGE 1 - PROCESS TESTS
  * =============================================================================*/
 
 void process_a(void)
@@ -443,7 +637,7 @@ void process_b(void)
 }
 
 /* =============================================================================
- * STAGE 2 — MUTEX TEST
+ * STAGE 2 - MUTEX TEST
  * =============================================================================*/
 
 static mutex_t test_mutex;
@@ -501,7 +695,7 @@ void thread_b(void *arg)
 }
 
 /* =============================================================================
- * STAGE 2 — PRODUCER / CONSUMER
+ * STAGE 2 - PRODUCER / CONSUMER
  * =============================================================================*/
 
 #define BUFFER_SIZE 4
@@ -605,7 +799,7 @@ void consumer(void *arg)
 }
 
 /* =============================================================================
- * STAGE 2 — RACE CONDITION TEST
+ * STAGE 2 - RACE CONDITION TEST
  * =============================================================================*/
 
 static volatile int myglobal = 0;
@@ -689,13 +883,14 @@ void kernel_main(void)
     /* Build the Stage 3 frame bitmap from the bootloader's BIOS E820 map. */
     pmm_init();
 
+    /* Allocate the 1 MB RAM disk and format the Stage 4 file system. */
+    filesystem_ready = fs_init();
+
     /* Display startup information */
     print_splash();
 
-    /* Stage 1 and Stage 2 implementations remain in the kernel. Their noisy
-     * demonstration tasks are not auto-started in Stage 3, leaving the shell
-     * usable for the meminfo command. The tagged older releases retain their
-     * original demonstrations for assessment. */
+    /* Earlier-stage implementations remain in the kernel. Their noisy demo
+     * tasks are not auto-started, leaving the Stage 4 shell usable. */
 
     /* -----------------------------------------------------------------------
      * Start scheduler

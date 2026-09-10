@@ -11,25 +11,22 @@ freestanding C and NASM assembly and runs in QEMU.
 | `v0.1-stage0` | Boot and shell | MBR bootloader, protected mode, VGA, keyboard, shell | Complete |
 | `v0.2-stage1` | Process scheduling | PCBs, PIT/IRQ0, context switching, round-robin scheduler | Complete |
 | `v0.3-stage2` | Threads and synchronization | Kernel threads, mutexes, semaphores, producer-consumer | Complete |
-| `v0.4-stage3` | Physical memory | BIOS E820 map, bitmap allocator, `meminfo` | Current |
-| `v0.5-stage4` | File system | RAM disk, superblock, inodes, file and shell APIs | Planned |
+| `v0.4-stage3` | Physical memory | BIOS E820 map, bitmap allocator, `meminfo` | Complete |
+| `v0.5-stage4` | File system | RAM disk, superblock, inodes, file and shell APIs | Current |
 
-## Stage 3: Physical Memory Manager
+## Stage 4: RAM Disk File System
 
-The bootloader requests the BIOS E820 memory map before entering protected
-mode. It stores the entry count at physical address `0x5000` and up to 32
-24-byte E820 entries starting at `0x5004`.
+Stage 4 adds a 1 MB RAM disk backed by 256 frames from the Stage 3 physical
+memory manager. The disk uses 512-byte blocks and is formatted during boot.
 
-`kernel/pmm.c` uses this map to manage the 32 MB QEMU memory range:
+The file system contains:
 
-- Each bitmap bit represents one 4 KB physical frame.
-- All frames begin reserved; only complete E820 type-1 ranges become free.
-- The first 1 MB stays reserved for BIOS data, the bootloader, kernel, stacks,
-  and memory-mapped hardware.
-- `pmm_alloc_frame()` returns an identity-mapped frame address.
-- `pmm_free_frame()` validates alignment and E820 usability before releasing a
-  frame.
-- The `meminfo` shell command shows E820 entry, total, used, and free counts.
+- A superblock describing the disk layout
+- Separate inode and data-block allocation bitmaps
+- 64 inodes with eight direct block pointers each
+- A flat directory supporting file names up to 27 characters
+- `fs_open()`, `fs_read()`, `fs_write()`, `fs_close()`, and `fs_unlink()`
+- `ls`, `touch`, `cat`, `write`, and `rm` shell commands
 
 ## Project Structure
 
@@ -46,6 +43,8 @@ kernel/
 ├── mutex.c/.h         Blocking mutex
 ├── semaphore.c/.h     Counting semaphore
 ├── pmm.c/.h           Stage 3 physical frame allocator
+├── ramdisk.c/.h       1 MB frame-backed RAM disk
+├── fs.c/.h            Inodes, directory, file API, and allocation bitmaps
 ├── keyboard.c/.h      PS/2 keyboard driver
 └── vga.c/.h           VGA text-mode driver
 include/types.h        Freestanding integer and utility types
@@ -64,9 +63,15 @@ make
 make run
 ```
 
-At the shell prompt, run:
+Example shell session:
 
 ```text
+touch hello.txt
+write hello.txt Hello from SENG21213-OS
+ls
+cat hello.txt
+rm hello.txt
+ls
 meminfo
 ```
 
